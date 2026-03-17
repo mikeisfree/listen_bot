@@ -1,0 +1,6 @@
+sounddevice
+numpy
+faster-whisper
+websockets
+nvidia-cublas-cu12
+nvidia-cudnn-cu12
