@@ -91,9 +91,9 @@ const App: React.FC = () => {
   return (
     <div className="glass">
       <div className="status-bar">
-        <h1>ListenBot <span className="text-dim">STT</span></h1>
+        <h1 style={{ fontSize: '1.5rem', fontWeight: 600, margin: 0 }}>ListenBot STT</h1>
         <div className={`badge ${isConnected ? 'badge-connected' : 'badge-disconnected'}`}>
-          {isConnected ? 'LOCAL SERVER ACTIVE' : 'RECONNECTING...'}
+          {isConnected ? 'SERVER ACTIVE' : 'RECONNECTING...'}
         </div>
       </div>
 
@@ -141,7 +141,7 @@ const App: React.FC = () => {
         <div className="full-width">
           {isRunning ? (
             <button className="btn btn-stop full-width" onClick={stopTranscription}>
-              <span className="animate-pulse">●</span> Stop Session & Save
+              <span className="recording-indicator"></span> Stop Session & Save
             </button>
           ) : (
             <button 
@@ -156,7 +156,7 @@ const App: React.FC = () => {
       </div>
 
       <div className="label">
-        System Status: <span style={{ color: isRunning ? 'var(--success)' : 'var(--text-main)' }}>{status}</span>
+        Status: <span style={{ color: isRunning ? 'var(--success)' : 'var(--text)' }}>{status}</span>
       </div>
 
       <div className="transcript-area" ref={transcriptRef}>
