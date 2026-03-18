@@ -19,10 +19,22 @@ const App: React.FC = () => {
   const ws = useRef<WebSocket | null>(null);
   const transcriptRef = useRef<HTMLDivElement>(null);
   const lastTranscript = useRef<string | null>(null);
+  const reconnectTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   useEffect(() => {
     connect();
-    return () => ws.current?.close();
+    return () => {
+      // Clear pending reconnect timer
+      if (reconnectTimer.current) {
+        clearTimeout(reconnectTimer.current);
+        reconnectTimer.current = null;
+      }
+      // Prevent onclose from scheduling a reconnect during unmount
+      if (ws.current) {
+        ws.current.onclose = null;
+        ws.current.close();
+      }
+    };
   }, []);
 
   useEffect(() => {
@@ -32,7 +44,15 @@ const App: React.FC = () => {
   }, [transcripts]);
 
   const connect = () => {
-    if (ws.current) ws.current.close();
+    // Clear any pending reconnect timer
+    if (reconnectTimer.current) {
+      clearTimeout(reconnectTimer.current);
+      reconnectTimer.current = null;
+    }
+    if (ws.current) {
+      ws.current.onclose = null; // Prevent this close from scheduling another reconnect
+      ws.current.close();
+    }
     ws.current = new WebSocket('ws://localhost:8765');
 
     ws.current.onopen = () => {
@@ -43,7 +63,7 @@ const App: React.FC = () => {
     ws.current.onclose = () => {
       setIsConnected(false);
       setStatus('Server Offline');
-      setTimeout(connect, 3000);
+      reconnectTimer.current = setTimeout(connect, 3000);
     };
 
     ws.current.onmessage = (event) => {
@@ -100,9 +120,9 @@ const App: React.FC = () => {
       <div className="controls-grid">
         <div>
           <label className="label">Whisper Model</label>
-          <select 
-            className="select-field" 
-            value={model} 
+          <select
+            className="select-field"
+            value={model}
             onChange={(e) => setModel(e.target.value)}
             disabled={isRunning}
           >
@@ -115,9 +135,9 @@ const App: React.FC = () => {
 
         <div>
           <label className="label">Audio Source</label>
-          <select 
-            className="select-field" 
-            value={source} 
+          <select
+            className="select-field"
+            value={source}
             onChange={(e) => setSource(e.target.value)}
             disabled={isRunning}
           >
@@ -128,9 +148,9 @@ const App: React.FC = () => {
 
         <div className="full-width">
           <label className="label">Markdown Filename</label>
-          <input 
+          <input
             className="input-field"
-            type="text" 
+            type="text"
             placeholder="e.g. daily_meeting"
             value={filename}
             onChange={(e) => setFilename(e.target.value)}
@@ -144,8 +164,8 @@ const App: React.FC = () => {
               <span className="recording-indicator"></span> Stop Session & Save
             </button>
           ) : (
-            <button 
-              className="btn btn-primary full-width" 
+            <button
+              className="btn btn-primary full-width"
               onClick={startTranscription}
               disabled={!isConnected}
             >

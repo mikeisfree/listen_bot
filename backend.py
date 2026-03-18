@@ -39,12 +39,19 @@ class TranscriptionManager:
         self.connected_clients = set()
         self.current_filename = ""
         self.loop = None
+        self.transcription_task = None
 
     async def broadcast(self, message):
         print(f"[LOG] {message.get('text', message.get('message', ''))}")
         if not self.connected_clients: return
         data = json.dumps(message)
-        await asyncio.gather(*[client.send(data) for client in self.connected_clients])
+        dead = set()
+        for client in list(self.connected_clients):
+            try:
+                await client.send(data)
+            except websockets.exceptions.ConnectionClosed:
+                dead.add(client)
+        self.connected_clients -= dead
 
     def audio_callback(self, indata, frames, time, status):
         if status: print(f"Audio Status: {status}", file=sys.stderr)
@@ -53,6 +60,7 @@ class TranscriptionManager:
     async def start_transcription(self, model_size, filename, source_type="system"):
         if self.is_running: return
         try:
+          try:
             self.current_filename = filename
             output_dir = "Transcripts"
             os.makedirs(output_dir, exist_ok=True)
@@ -124,6 +132,11 @@ class TranscriptionManager:
                         audio_buffer = np.array([], dtype=np.float32)
                     await asyncio.sleep(0.4)
 
+          except asyncio.CancelledError:
+            print(f"[LOG] Transcription task cancelled for source: {source_type}")
+            self.is_running = False
+            return
+
         except Exception as e:
             await self.broadcast({"type": "error", "message": f"Source {source_type} failed: {str(e)}"})
             self.is_running = False
@@ -135,15 +148,20 @@ class TranscriptionManager:
                 data = json.loads(message)
                 action = data.get("action")
                 if action == "start":
-                    asyncio.create_task(self.start_transcription(
+                    # Stop any existing transcription before starting a new one
+                    if self.is_running:
+                        self.is_running = False
+                        await asyncio.sleep(0.5)  # Let the loop exit
+                    self.transcription_task = asyncio.create_task(self.start_transcription(
                         data.get("model", "medium"), 
                         data.get("filename", "web_transcript"),
                         data.get("source", "system")
                     ))
                 elif action == "stop":
                     self.is_running = False
+                    await self.broadcast({"type": "status", "text": "Stopped."})
         finally:
-            self.connected_clients.remove(websocket)
+            self.connected_clients.discard(websocket)
 
     async def cli_input_task(self):
         """Asynchronously waits for CLI input to start transcription without Web."""
