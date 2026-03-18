@@ -10,6 +10,7 @@ interface Message {
 
 const App: React.FC = () => {
   const [model, setModel] = useState('small');
+  const [source, setSource] = useState('system');
   const [filename, setFilename] = useState('transcript_web');
   const [isRunning, setIsRunning] = useState(false);
   const [status, setStatus] = useState('Disconnected');
@@ -71,7 +72,8 @@ const App: React.FC = () => {
       ws.current.send(JSON.stringify({
         action: 'start',
         model: model,
-        filename: filename
+        filename: filename,
+        source: source
       }));
       setTranscripts([]);
       lastTranscript.current = null;
@@ -112,6 +114,19 @@ const App: React.FC = () => {
         </div>
 
         <div>
+          <label className="label">Audio Source</label>
+          <select 
+            className="select-field" 
+            value={source} 
+            onChange={(e) => setSource(e.target.value)}
+            disabled={isRunning}
+          >
+            <option value="system">System Audio (Monitor)</option>
+            <option value="mic">Microphone (Input)</option>
+          </select>
+        </div>
+
+        <div className="full-width">
           <label className="label">Markdown Filename</label>
           <input 
             className="input-field"
