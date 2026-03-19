@@ -109,63 +109,68 @@ const App: React.FC = () => {
   };
 
   return (
-    <div className="glass">
-      <div className="status-bar">
-        <h1 style={{ fontSize: '1.5rem', fontWeight: 600, margin: 0 }}>ListenBot STT</h1>
-        <div className={`badge ${isConnected ? 'badge-connected' : 'badge-disconnected'}`}>
-          {isConnected ? 'SERVER ACTIVE' : 'RECONNECTING...'}
-        </div>
-      </div>
+    <div className="layout">
+      <aside className="sidebar">
+        <header className="sidebar-header">
+          <h1 className="app-title">ListenBot</h1>
+          <div className="status-indicator">
+            <span className={`status-dot ${isConnected ? 'connected' : 'disconnected'}`}></span>
+            <span className="status-text">{isConnected ? 'Server Active' : 'Offline'}</span>
+          </div>
+        </header>
 
-      <div className="controls-grid">
-        <div>
-          <label className="label">Whisper Model</label>
-          <select
-            className="select-field"
-            value={model}
-            onChange={(e) => setModel(e.target.value)}
-            disabled={isRunning}
-          >
-            <option value="tiny">Tiny (Fastest)</option>
-            <option value="base">Base (Balanced)</option>
-            <option value="small">Small (Good accuracy)</option>
-            <option value="medium">Medium (Professional)</option>
-          </select>
-        </div>
+        <form className="settings-form" onSubmit={(e) => e.preventDefault()}>
+          <div className="field">
+            <label htmlFor="model">Whisper Model</label>
+            <select
+              id="model"
+              value={model}
+              onChange={(e) => setModel(e.target.value)}
+              disabled={isRunning}
+            >
+              <option value="tiny">Tiny (Fastest)</option>
+              <option value="base">Base (Balanced)</option>
+              <option value="small">Small (Good Accuracy)</option>
+              <option value="medium">Medium (Professional)</option>
+            </select>
+            <div className="field-help">Determines transcription speed vs accuracy.</div>
+          </div>
 
-        <div>
-          <label className="label">Audio Source</label>
-          <select
-            className="select-field"
-            value={source}
-            onChange={(e) => setSource(e.target.value)}
-            disabled={isRunning}
-          >
-            <option value="system">System Audio (Monitor)</option>
-            <option value="mic">Microphone (Input)</option>
-          </select>
-        </div>
+          <div className="field">
+            <label htmlFor="source">Audio Source</label>
+            <select
+              id="source"
+              value={source}
+              onChange={(e) => setSource(e.target.value)}
+              disabled={isRunning}
+            >
+              <option value="system">System Audio (Monitor)</option>
+              <option value="mic">Microphone (Input)</option>
+            </select>
+            <div className="field-help">Source of the audio to transcribe.</div>
+          </div>
 
-        <div className="full-width">
-          <label className="label">Markdown Filename</label>
-          <input
-            className="input-field"
-            type="text"
-            placeholder="e.g. daily_meeting"
-            value={filename}
-            onChange={(e) => setFilename(e.target.value)}
-            disabled={isRunning}
-          />
-        </div>
+          <div className="field">
+            <label htmlFor="filename">Markdown Filename</label>
+            <input
+              id="filename"
+              type="text"
+              placeholder="e.g. daily_meeting"
+              value={filename}
+              onChange={(e) => setFilename(e.target.value)}
+              disabled={isRunning}
+            />
+          </div>
+        </form>
 
-        <div className="full-width">
+        <div className="sidebar-footer">
           {isRunning ? (
-            <button className="btn btn-stop full-width" onClick={stopTranscription}>
-              <span className="recording-indicator"></span> Stop Session & Save
+            <button className="btn btn-danger" onClick={stopTranscription}>
+              Stop Session
             </button>
           ) : (
             <button
-              className="btn btn-primary full-width"
+              className="btn btn-primary"
               onClick={startTranscription}
               disabled={!isConnected}
             >
@@ -173,25 +178,35 @@ const App: React.FC = () => {
             </button>
           )}
         </div>
-      </div>
+      </aside>
 
-      <div className="label">
-        Status: <span style={{ color: isRunning ? 'var(--success)' : 'var(--text)' }}>{status}</span>
-      </div>
-
-      <div className="transcript-area" ref={transcriptRef}>
-        {transcripts.length === 0 ? (
-          <div className="text-dim" style={{ textAlign: 'center', marginTop: '10%' }}>
-            {isRunning ? 'Analyzing audio...' : 'Press Start to begin transcription...'}
+      <main className="main-content">
+        <header className="content-header">
+          <h2>Notes</h2>
+          <div className="status-badge" title={status}>
+            <span className={`status-light ${isRunning ? 'pulse-recording' : (isConnected ? 'ready' : 'offline')}`}></span>
+            <span className="status-label">
+              {isRunning ? 'Recording' : (isConnected ? 'Ready' : 'Offline')}
+            </span>
           </div>
-        ) : (
-          transcripts.map((line, i) => (
-            <div key={i} className="transcript-line">
-              {line}
+        </header>
+
+        <div className="transcript-container" ref={transcriptRef}>
+          {transcripts.length === 0 ? (
+            <div className="empty-state">
+              {isRunning ? 'Listening and analyzing...' : 'Press Start Recording to begin transcription.'}
             </div>
-          ))
-        )}
-      </div>
+          ) : (
+            <div className="transcript-list">
+              {transcripts.map((line, i) => (
+                <p key={i} className="transcript-line">
+                  {line}
+                </p>
+              ))}
+            </div>
+          )}
+        </div>
+      </main>
     </div>
   );
 };
