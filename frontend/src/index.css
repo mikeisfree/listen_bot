@@ -127,7 +127,8 @@ body {
   color: #55555c;
 }
 
-input, select {
+input,
+select {
   width: 100%;
   background-color: transparent;
   border: 1px solid var(--border);
@@ -154,14 +155,16 @@ select option {
   color: var(--text);
 }
 
-input:focus, select:focus {
+input:focus,
+select:focus {
   outline: none;
   border-color: var(--border-focus);
   box-shadow: 0 0 0 1px rgba(85, 85, 96, 0.4);
   background-color: rgba(255, 255, 255, 0.02);
 }
 
-input:disabled, select:disabled {
+input:disabled,
+select:disabled {
   opacity: 0.5;
   cursor: not-allowed;
 }
@@ -226,8 +229,11 @@ input:disabled, select:disabled {
 .main-content::before {
   content: '';
   position: absolute;
-  top: 0; right: 0; bottom: 0; left: 0;
-  background-image: 
+  top: 0;
+  right: 0;
+  bottom: 0;
+  left: 0;
+  background-image:
     radial-gradient(circle at 70% 20%, rgba(35, 30, 45, 0.4), transparent 45%),
     radial-gradient(circle at 30% 80%, rgba(20, 30, 40, 0.3), transparent 45%);
   z-index: -1;
@@ -236,9 +242,20 @@ input:disabled, select:disabled {
 }
 
 @keyframes gentle-glow {
-  0% { transform: scale(1) translate(0, 0); opacity: 0.5; }
-  50% { transform: scale(1.05) translate(2%, 2%); opacity: 0.8; }
-  100% { transform: scale(0.95) translate(-2%, -2%); opacity: 0.5; }
+  0% {
+    transform: scale(1) translate(0, 0);
+    opacity: 0.5;
+  }
+
+  50% {
+    transform: scale(1.05) translate(2%, 2%);
+    opacity: 0.8;
+  }
+
+  100% {
+    transform: scale(0.95) translate(-2%, -2%);
+    opacity: 0.5;
+  }
 }
 
 .content-header {
@@ -289,8 +306,17 @@ input:disabled, select:disabled {
 }
 
 @keyframes pulse-red {
-  0% { opacity: 0.6; transform: scale(0.95); box-shadow: 0 0 8px var(--danger-bg); }
-  100% { opacity: 1; transform: scale(1.1); box-shadow: 0 0 16px var(--danger-bg), 0 0 28px rgba(255, 77, 77, 0.6); }
+  0% {
+    opacity: 0.6;
+    transform: scale(0.95);
+    box-shadow: 0 0 8px var(--danger-bg);
+  }
+
+  100% {
+    opacity: 1;
+    transform: scale(1.1);
+    box-shadow: 0 0 16px var(--danger-bg), 0 0 28px rgba(255, 77, 77, 0.6);
+  }
 }
 
 .status-label {
@@ -300,13 +326,38 @@ input:disabled, select:disabled {
   letter-spacing: 0.03em;
 }
 
+.keyword-indicator {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-left: 16px;
+}
+
+.keyword-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background-color: var(--text-muted);
+  transition: all 200ms ease;
+}
+
+.keyword-dot.keyword-active {
+  background-color: #ffa500;
+  box-shadow: 0 0 12px rgba(255, 165, 0, 0.8);
+}
+
+.keyword-label {
+  font-size: 12px;
+  color: var(--text-muted);
+}
+
 .transcript-container {
   flex-grow: 1;
   padding: 0 48px 48px;
   overflow-y: auto;
   line-height: 1.85;
   z-index: 2;
-  
+
   /* Fade out at top and bottom */
   -webkit-mask-image: linear-gradient(to bottom, transparent 0%, black 10%, black 90%, transparent 100%);
   mask-image: linear-gradient(to bottom, transparent 0%, black 10%, black 90%, transparent 100%);

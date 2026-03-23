@@ -1,21 +1,22 @@
-import React, { useState, useEffect, useRef } from 'react';
-import './index.css';
+import React, { useState, useEffect, useRef } from "react";
+import "./index.css";
 
 interface Message {
-  type: 'status' | 'transcript' | 'error';
+  type: "status" | "transcript" | "error";
   text?: string;
   message?: string;
   filename?: string;
 }
 
 const App: React.FC = () => {
-  const [model, setModel] = useState('small');
-  const [source, setSource] = useState('system');
-  const [filename, setFilename] = useState('transcript_web');
+  const [model, setModel] = useState("small");
+  const [source, setSource] = useState("system");
+  const [filename, setFilename] = useState("transcript_web");
   const [isRunning, setIsRunning] = useState(false);
-  const [status, setStatus] = useState('Disconnected');
+  const [status, setStatus] = useState("Disconnected");
   const [isConnected, setIsConnected] = useState(false);
   const [transcripts, setTranscripts] = useState<string[]>([]);
+  const [keywordDetected, setKeywordDetected] = useState(false);
   const ws = useRef<WebSocket | null>(null);
   const transcriptRef = useRef<HTMLDivElement>(null);
   const lastTranscript = useRef<string | null>(null);
@@ -53,34 +54,39 @@ const App: React.FC = () => {
       ws.current.onclose = null; // Prevent this close from scheduling another reconnect
       ws.current.close();
     }
-    ws.current = new WebSocket('ws://localhost:8765');
+    ws.current = new WebSocket("ws://localhost:8765");
 
     ws.current.onopen = () => {
       setIsConnected(true);
-      setStatus('System Ready');
+      setStatus("System Ready");
     };
 
     ws.current.onclose = () => {
       setIsConnected(false);
-      setStatus('Server Offline');
+      setStatus("Server Offline");
       reconnectTimer.current = setTimeout(connect, 3000);
     };
 
     ws.current.onmessage = (event) => {
-      const data: Message = JSON.parse(event.data);
-      if (data.type === 'status') {
-        setStatus(data.text || '');
-        if (data.text?.includes('Recording')) setIsRunning(true);
-        if (data.text === 'Stopped.') setIsRunning(false);
-      } else if (data.type === 'transcript') {
-        const text = data.text || '';
-        // Prevent accidental duplicate from double-mount or same buffer processing
+      const data: Message | any = JSON.parse(event.data);
+      if (data.type === "status") {
+        setStatus(data.text || "");
+        if (data.text?.includes("Recording")) setIsRunning(true);
+        if (data.text === "Stopped.") setIsRunning(false);
+      } else if (data.type === "transcript") {
+        const text = data.text || "";
         if (text !== lastTranscript.current) {
-          setTranscripts(prev => [...prev.slice(-100), text]);
+          setTranscripts((prev) => [...prev.slice(-100), text]);
           lastTranscript.current = text;
           setIsRunning(true);
         }
-      } else if (data.type === 'error') {
+      } else if (data.type === "keyword") {
+        if (data.keyword === "grab") {
+          setKeywordDetected(true);
+          setStatus("Key command: grab detected");
+          setTimeout(() => setKeywordDetected(false), 1200);
+        }
+      } else if (data.type === "error") {
         setStatus(`Error: ${data.message}`);
         setIsRunning(false);
       }
@@ -89,21 +95,23 @@ const App: React.FC = () => {
 
   const startTranscription = () => {
     if (ws.current?.readyState === WebSocket.OPEN) {
-      ws.current.send(JSON.stringify({
-        action: 'start',
-        model: model,
-        filename: filename,
-        source: source
-      }));
+      ws.current.send(
+        JSON.stringify({
+          action: "start",
+          model: model,
+          filename: filename,
+          source: source,
+        }),
+      );
       setTranscripts([]);
       lastTranscript.current = null;
-      setStatus('Starting Server...');
+      setStatus("Starting Server...");
     }
   };
 
   const stopTranscription = () => {
     if (ws.current?.readyState === WebSocket.OPEN) {
-      ws.current.send(JSON.stringify({ action: 'stop' }));
+      ws.current.send(JSON.stringify({ action: "stop" }));
       setIsRunning(false);
     }
   };
@@ -114,8 +122,12 @@ const App: React.FC = () => {
         <header className="sidebar-header">
           <h1 className="app-title">ListenBot</h1>
           <div className="status-indicator">
-            <span className={`status-dot ${isConnected ? 'connected' : 'disconnected'}`}></span>
-            <span className="status-text">{isConnected ? 'Server Active' : 'Offline'}</span>
+            <span
+              className={`status-dot ${isConnected ? "connected" : "disconnected"}`}
+            ></span>
+            <span className="status-text">
+              {isConnected ? "Server Active" : "Offline"}
+            </span>
           </div>
         </header>
 
@@ -133,7 +145,9 @@ const App: React.FC = () => {
               <option value="small">Small (Good Accuracy)</option>
               <option value="medium">Medium (Professional)</option>
             </select>
-            <div className="field-help">Determines transcription speed vs accuracy.</div>
+            <div className="field-help">
+              Determines transcription speed vs accuracy.
+            </div>
           </div>
 
           <div className="field">
@@ -146,6 +160,9 @@ const App: React.FC = () => {
             >
               <option value="system">System Audio (Monitor)</option>
               <option value="mic">Microphone (Input)</option>
+              <option value="both">
+                Both: System transcription + voice command
+              </option>
             </select>
             <div className="field-help">Source of the audio to transcribe.</div>
           </div>
@@ -184,17 +201,27 @@ const App: React.FC = () => {
         <header className="content-header">
           <h2>Notes</h2>
           <div className="status-badge" title={status}>
-            <span className={`status-light ${isRunning ? 'pulse-recording' : (isConnected ? 'ready' : 'offline')}`}></span>
+            <span
+              className={`status-light ${isRunning ? "pulse-recording" : isConnected ? "ready" : "offline"}`}
+            ></span>
             <span className="status-label">
-              {isRunning ? 'Recording' : (isConnected ? 'Ready' : 'Offline')}
+              {isRunning ? "Recording" : isConnected ? "Ready" : "Offline"}
             </span>
+          </div>
+          <div className="keyword-indicator" title="grab command indicator">
+            <span
+              className={`keyword-dot ${keywordDetected ? "keyword-active" : ""}`}
+            ></span>
+            <span className="keyword-label">Grab</span>
           </div>
         </header>
 
         <div className="transcript-container" ref={transcriptRef}>
           {transcripts.length === 0 ? (
             <div className="empty-state">
-              {isRunning ? 'Listening and analyzing...' : 'Press Start Recording to begin transcription.'}
+              {isRunning
+                ? "Listening and analyzing..."
+                : "Press Start Recording to begin transcription."}
             </div>
           ) : (
             <div className="transcript-list">

@@ -32,18 +32,18 @@ setup_cuda_paths()
 
 class TranscriptionManager:
     def __init__(self):
-        self.model = None
-        self.audio_queue = queue.Queue()
         self.sample_rate = 16000
-        self.is_running = False
         self.connected_clients = set()
         self.current_filename = ""
         self.loop = None
-        self.transcription_task = None
+        self.system_task = None
+        self.command_task = None
+        self.running_sources = set()
 
     async def broadcast(self, message):
         print(f"[LOG] {message.get('text', message.get('message', ''))}")
-        if not self.connected_clients: return
+        if not self.connected_clients:
+            return
         data = json.dumps(message)
         dead = set()
         for client in list(self.connected_clients):
@@ -53,93 +53,142 @@ class TranscriptionManager:
                 dead.add(client)
         self.connected_clients -= dead
 
-    def audio_callback(self, indata, frames, time, status):
-        if status: print(f"Audio Status: {status}", file=sys.stderr)
-        if self.is_running: self.audio_queue.put(indata.copy())
+    def _audio_callback_factory(self, q):
+        def callback(indata, frames, time, status):
+            if status:
+                print(f"Audio Status: {status}", file=sys.stderr)
+            q.put(indata.copy())
+        return callback
 
-    async def start_transcription(self, model_size, filename, source_type="system"):
-        if self.is_running: return
-        try:
-          try:
-            self.current_filename = filename
-            output_dir = "Transcripts"
-            os.makedirs(output_dir, exist_ok=True)
+    def _select_device(self, source_type):
+        devices = sd.query_devices()
+        device_id = None
+        if source_type == "system":
+            for i, dev in enumerate(devices):
+                if "monitor" in dev["name"].lower() and dev["max_input_channels"] > 0:
+                    device_id = i
+                    break
+            if device_id is None:
+                for i, dev in enumerate(devices):
+                    if any(n in dev["name"].lower() for n in ["pulse", "pipewire"]) and dev["max_input_channels"] > 0:
+                        device_id = i
+                        break
+        else:
+            default_input = sd.default.device
+            if isinstance(default_input, (list, tuple)) and len(default_input) > 0 and default_input[0] is not None:
+                device_id = default_input[0]
+            elif isinstance(default_input, int) and default_input >= 0:
+                device_id = default_input
+            else:
+                for i, dev in enumerate(devices):
+                    if dev["max_input_channels"] > 0 and "microphone" in dev["name"].lower():
+                        device_id = i
+                        break
+        return device_id, devices
+
+    async def start_transcription(self, model_size, filename, source_type="system", command_mode=False):
+        self.current_filename = filename
+        output_dir = "Transcripts"
+        os.makedirs(output_dir, exist_ok=True)
+
+        if command_mode:
+            output_path = None
+        else:
             output_path = os.path.join(output_dir, f"{filename}.md")
-
-            await self.broadcast({"type": "status", "text": f"Loading model '{model_size}'..."})
-            
-            def load():
-                try:
-                    return WhisperModel(model_size, device="cuda", compute_type="int8")
-                except:
-                    return WhisperModel(model_size, device="cpu", compute_type="int8", cpu_threads=4)
-            
-            self.model = await asyncio.get_running_loop().run_in_executor(None, load)
-            await self.broadcast({"type": "status", "text": f"Model loaded. Source: {source_type}. Recording..."})
-
             if not os.path.exists(output_path):
                 with open(output_path, "w", encoding="utf-8") as f:
                     f.write(f"# Transcription: {filename}\nSource: {source_type}\nDate: {datetime.now()}\n\n---\n\n")
 
-            self.is_running = True
-            audio_buffer = np.array([], dtype=np.float32)
-            last_text = ""
-            
-            # Select Audio Device
-            devices = sd.query_devices()
-            device_id = None
-            
-            if source_type == "system":
-                for i, dev in enumerate(devices):
-                    if 'monitor' in dev['name'].lower() and dev['max_input_channels'] > 0:
-                        device_id = i; break
-                if device_id is None:
-                    # Fallback to pulse/pipewire if generic monitor not found
-                    for i, dev in enumerate(devices):
-                        if any(n in dev['name'].lower() for n in ['pulse', 'pipewire']) and dev['max_input_channels'] > 0:
-                            device_id = i; break
-            else: # source_type == "mic"
-                device_id = sd.default.device[0] # Default System Input
-            
-            device_name = devices[device_id]['name'] if device_id is not None else "Default"
-            print(f"[LOG] Using device: {device_name} (ID: {device_id})")
+        await self.broadcast({"type": "status", "text": f"Loading model '{model_size}' for {source_type}..."})
 
-            with sd.InputStream(device=device_id, samplerate=self.sample_rate, channels=1, callback=self.audio_callback):
-                while self.is_running:
-                    while not self.audio_queue.empty():
-                        chunk = self.audio_queue.get()
+        def load_model():
+            try:
+                return WhisperModel(model_size, device="cuda", compute_type="int8")
+            except Exception:
+                return WhisperModel(model_size, device="cpu", compute_type="int8", cpu_threads=4)
+
+        model = await asyncio.get_running_loop().run_in_executor(None, load_model)
+        await self.broadcast({"type": "status", "text": f"Model loaded. Source: {source_type}. Recording..."})
+
+        device_id, devices = self._select_device(source_type)
+        device_name = devices[device_id]["name"] if device_id is not None and 0 <= device_id < len(devices) else "Default"
+        print(f"[LOG] Using device: {device_name} (ID: {device_id})")
+
+        audio_queue = queue.Queue()
+        callback = self._audio_callback_factory(audio_queue)
+
+        if command_mode:
+            self.running_sources.add("mic_command")
+        else:
+            self.running_sources.add(source_type)
+
+        audio_buffer = np.array([], dtype=np.float32)
+        last_text = ""
+
+        try:
+            with sd.InputStream(device=device_id, samplerate=self.sample_rate, channels=1, callback=callback):
+                while (source_type == "system" and "system" in self.running_sources) or \
+                      (source_type == "mic" and ("mic" in self.running_sources or "mic_command" in self.running_sources)):
+                    while not audio_queue.empty():
+                        chunk = audio_queue.get()
                         audio_buffer = np.append(audio_buffer, chunk.flatten())
 
-                    if len(audio_buffer) >= self.sample_rate * 4:
-                        segments, _ = self.model.transcribe(
-                            audio_buffer, beam_size=5, language="pl", 
-                            vad_filter=True, condition_on_previous_text=True
-                        )
-                        
+                    if len(audio_buffer) >= self.sample_rate * 3:
+                        try:
+                            segments, _ = model.transcribe(
+                                audio_buffer,
+                                beam_size=5,
+                                language="pl",
+                                vad_filter=True,
+                                condition_on_previous_text=True,
+                            )
+                        except Exception as e:
+                            await self.broadcast({"type": "error", "message": f"Transcribe error for {source_type}: {str(e)}"})
+                            audio_buffer = np.array([], dtype=np.float32)
+                            await asyncio.sleep(0.2)
+                            continue
+
                         found = []
                         for s in segments:
                             t = s.text.strip()
-                            if t and t not in last_text:
+                            if not t:
+                                continue
+                            if command_mode:
                                 found.append(t)
-                                last_text = t # Update last_text per segment
+                            elif t != last_text:
+                                found.append(t)
+                                last_text = t
 
-                        if found:
-                            current_text = " ".join(found)
-                            await self.broadcast({"type": "transcript", "text": current_text})
-                            with open(output_path, "a", encoding="utf-8") as f:
-                                f.write(f"{current_text}  \n"); f.flush()
-                        
+                        if command_mode:
+                            recognized = " ".join(found).lower()
+                            if "grab" in recognized.split():
+                                await self.broadcast({"type": "keyword", "keyword": "grab", "text": "command: grab"})
+                                print("[LOG] grab command detected")
+                        else:
+                            if found:
+                                current_text = " ".join(found)
+                                await self.broadcast({"type": "transcript", "text": current_text})
+                                if output_path:
+                                    with open(output_path, "a", encoding="utf-8") as f:
+                                        f.write(f"{current_text}  \n")
+
                         audio_buffer = np.array([], dtype=np.float32)
-                    await asyncio.sleep(0.4)
 
-          except asyncio.CancelledError:
+                    await asyncio.sleep(0.3)
+
+        except asyncio.CancelledError:
             print(f"[LOG] Transcription task cancelled for source: {source_type}")
-            self.is_running = False
-            return
-
+            raise
         except Exception as e:
             await self.broadcast({"type": "error", "message": f"Source {source_type} failed: {str(e)}"})
-            self.is_running = False
+        finally:
+            key = "mic_command" if command_mode else source_type
+            self.running_sources.discard(key)
+            if source_type == "system":
+                self.system_task = None
+            elif source_type == "mic" and command_mode:
+                self.command_task = None
+            await self.broadcast({"type": "status", "text": f"{source_type.capitalize()} stream stopped."})
 
     async def ws_handler(self, websocket):
         self.connected_clients.add(websocket)
@@ -148,34 +197,57 @@ class TranscriptionManager:
                 data = json.loads(message)
                 action = data.get("action")
                 if action == "start":
-                    # Stop any existing transcription before starting a new one
-                    if self.is_running:
-                        self.is_running = False
-                        await asyncio.sleep(0.5)  # Let the loop exit
-                    self.transcription_task = asyncio.create_task(self.start_transcription(
-                        data.get("model", "medium"), 
-                        data.get("filename", "web_transcript"),
-                        data.get("source", "system")
-                    ))
+                    if self.system_task and not self.system_task.done():
+                        self.system_task.cancel()
+                    if self.command_task and not self.command_task.done():
+                        self.command_task.cancel()
+
+                    source = data.get("source", "system")
+                    model_size = data.get("model", "small")
+                    filename = data.get("filename", "web_transcript")
+
+                    if source == "both":
+                        self.system_task = asyncio.create_task(self.start_transcription(model_size, filename, source_type="system", command_mode=False))
+                        self.command_task = asyncio.create_task(self.start_transcription(model_size, f"{filename}_cmd", source_type="mic", command_mode=True))
+                        await self.broadcast({"type": "status", "text": "Started both system transcription and microphone command listener"})
+                    elif source == "system":
+                        self.system_task = asyncio.create_task(self.start_transcription(model_size, filename, source_type="system", command_mode=False))
+                        await self.broadcast({"type": "status", "text": "Started system transcription"})
+                    elif source == "mic":
+                        self.command_task = asyncio.create_task(self.start_transcription(model_size, filename, source_type="mic", command_mode=False))
+                        await self.broadcast({"type": "status", "text": "Started microphone transcription"})
+                    else:
+                        await self.broadcast({"type": "error", "message": f"Unknown source '{source}'"})
                 elif action == "stop":
-                    self.is_running = False
+                    self.running_sources.clear()
+                    if self.system_task and not self.system_task.done():
+                        self.system_task.cancel()
+                    if self.command_task and not self.command_task.done():
+                        self.command_task.cancel()
                     await self.broadcast({"type": "status", "text": "Stopped."})
         finally:
             self.connected_clients.discard(websocket)
 
     async def cli_input_task(self):
-        """Asynchronously waits for CLI input to start transcription without Web."""
         while True:
             print("\n[CLI] Start transcription? Enter filename (or press Enter to skip): ", end="", flush=True)
             filename = await asyncio.get_running_loop().run_in_executor(None, sys.stdin.readline)
             filename = filename.strip()
             if filename:
-                print("[CLI] Select source: (1) System Audio [Default], (2) Microphone: ", end="", flush=True)
+                print("[CLI] Select source: (1) System Audio [Default], (2) Microphone, (3) Both: ", end="", flush=True)
                 choice = await asyncio.get_running_loop().run_in_executor(None, sys.stdin.readline)
-                source = "mic" if choice.strip() == "2" else "system"
-                
+                source = "mic" if choice.strip() == "2" else ("both" if choice.strip() == "3" else "system")
                 print(f"[CLI] Starting local transcription for: {filename} from {source}")
-                await self.start_transcription("medium", filename, source)
+
+                if source == "both":
+                    if self.system_task and not self.system_task.done():
+                        self.system_task.cancel()
+                    if self.command_task and not self.command_task.done():
+                        self.command_task.cancel()
+                    self.system_task = asyncio.create_task(self.start_transcription("small", filename, source_type="system", command_mode=False))
+                    self.command_task = asyncio.create_task(self.start_transcription("small", f"{filename}_cmd", source_type="mic", command_mode=True))
+                else:
+                    await self.start_transcription("small", filename, source_type=source, command_mode=False)
             await asyncio.sleep(1)
 
 async def main():

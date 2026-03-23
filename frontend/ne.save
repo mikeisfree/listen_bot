@@ -1,0 +1,17 @@
+share an app which i design to cover my current needs
+
+- this is a simple dictation app
+
+- utlyzes whisper models (variaty to  choose from)
+
+- can be conterolled through cli or frontend
+
+- plugs in directly to youre suystem audio source or mic or both
+
+- why? so many out there
+	- tiny one fiole app (core)
+	- everything is local
+	- it is more fun
+	- it is just a beginning
+
+
