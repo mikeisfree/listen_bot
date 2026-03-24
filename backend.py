@@ -86,7 +86,7 @@ class TranscriptionManager:
                         break
         return device_id, devices
 
-    async def start_transcription(self, model_size, filename, source_type="system", command_mode=False):
+    async def start_transcription(self, model_size, filename, source_type="system", command_mode=False, interval=6.0):
         self.current_filename = filename
         output_dir = "Transcripts"
         os.makedirs(output_dir, exist_ok=True)
@@ -133,7 +133,7 @@ class TranscriptionManager:
                         chunk = audio_queue.get()
                         audio_buffer = np.append(audio_buffer, chunk.flatten())
 
-                    if len(audio_buffer) >= self.sample_rate * 3:
+                    if len(audio_buffer) >= self.sample_rate * interval:
                         try:
                             segments, _ = model.transcribe(
                                 audio_buffer,
@@ -203,18 +203,19 @@ class TranscriptionManager:
                         self.command_task.cancel()
 
                     source = data.get("source", "system")
-                    model_size = data.get("model", "small")
+                    model_size = data.get("model", "medium")
                     filename = data.get("filename", "web_transcript")
+                    interval = float(data.get("interval", 6))
 
                     if source == "both":
-                        self.system_task = asyncio.create_task(self.start_transcription(model_size, filename, source_type="system", command_mode=False))
-                        self.command_task = asyncio.create_task(self.start_transcription(model_size, f"{filename}_cmd", source_type="mic", command_mode=True))
+                        self.system_task = asyncio.create_task(self.start_transcription(model_size, filename, source_type="system", command_mode=False, interval=interval))
+                        self.command_task = asyncio.create_task(self.start_transcription(model_size, f"{filename}_cmd", source_type="mic", command_mode=True, interval=interval))
                         await self.broadcast({"type": "status", "text": "Started both system transcription and microphone command listener"})
                     elif source == "system":
-                        self.system_task = asyncio.create_task(self.start_transcription(model_size, filename, source_type="system", command_mode=False))
+                        self.system_task = asyncio.create_task(self.start_transcription(model_size, filename, source_type="system", command_mode=False, interval=interval))
                         await self.broadcast({"type": "status", "text": "Started system transcription"})
                     elif source == "mic":
-                        self.command_task = asyncio.create_task(self.start_transcription(model_size, filename, source_type="mic", command_mode=False))
+                        self.command_task = asyncio.create_task(self.start_transcription(model_size, filename, source_type="mic", command_mode=False, interval=interval))
                         await self.broadcast({"type": "status", "text": "Started microphone transcription"})
                     else:
                         await self.broadcast({"type": "error", "message": f"Unknown source '{source}'"})
@@ -237,17 +238,28 @@ class TranscriptionManager:
                 print("[CLI] Select source: (1) System Audio [Default], (2) Microphone, (3) Both: ", end="", flush=True)
                 choice = await asyncio.get_running_loop().run_in_executor(None, sys.stdin.readline)
                 source = "mic" if choice.strip() == "2" else ("both" if choice.strip() == "3" else "system")
-                print(f"[CLI] Starting local transcription for: {filename} from {source}")
+                print("[CLI] Select model size (tiny, base, small, medium) [Default: medium]: ", end="", flush=True)
+                model_choice = await asyncio.get_running_loop().run_in_executor(None, sys.stdin.readline)
+                model_size = model_choice.strip() or "medium"
+
+                print("[CLI] Enable transcription delay in seconds (default: 6.0): ", end="", flush=True)
+                interval_choice = await asyncio.get_running_loop().run_in_executor(None, sys.stdin.readline)
+                try:
+                    interval = float(interval_choice.strip())
+                except ValueError:
+                    interval = 6.0
+
+                print(f"[CLI] Starting local transcription for: {filename} from {source} (Model: {model_size}, Delay: {interval}s)")
 
                 if source == "both":
                     if self.system_task and not self.system_task.done():
                         self.system_task.cancel()
                     if self.command_task and not self.command_task.done():
                         self.command_task.cancel()
-                    self.system_task = asyncio.create_task(self.start_transcription("small", filename, source_type="system", command_mode=False))
-                    self.command_task = asyncio.create_task(self.start_transcription("small", f"{filename}_cmd", source_type="mic", command_mode=True))
+                    self.system_task = asyncio.create_task(self.start_transcription(model_size, filename, source_type="system", command_mode=False, interval=interval))
+                    self.command_task = asyncio.create_task(self.start_transcription(model_size, f"{filename}_cmd", source_type="mic", command_mode=True, interval=interval))
                 else:
-                    await self.start_transcription("small", filename, source_type=source, command_mode=False)
+                    await self.start_transcription(model_size, filename, source_type=source, command_mode=False, interval=interval)
             await asyncio.sleep(1)
 
 async def main():

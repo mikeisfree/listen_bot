@@ -12,6 +12,7 @@ const App: React.FC = () => {
   const [model, setModel] = useState("small");
   const [source, setSource] = useState("system");
   const [filename, setFilename] = useState("transcript_web");
+  const [interval, setIntervalVal] = useState("6.0");
   const [isRunning, setIsRunning] = useState(false);
   const [status, setStatus] = useState("Disconnected");
   const [isConnected, setIsConnected] = useState(false);
@@ -101,6 +102,7 @@ const App: React.FC = () => {
           model: model,
           filename: filename,
           source: source,
+          interval: parseFloat(interval),
         }),
       );
       setTranscripts([]);
@@ -165,6 +167,20 @@ const App: React.FC = () => {
               </option>
             </select>
             <div className="field-help">Source of the audio to transcribe.</div>
+          </div>
+
+          <div className="field">
+            <label htmlFor="interval">Transcription Delay (s)</label>
+            <input
+              id="interval"
+              type="number"
+              min="1"
+              step="0.5"
+              value={interval}
+              onChange={(e) => setIntervalVal(e.target.value)}
+              disabled={isRunning}
+            />
+            <div className="field-help">Time in seconds before transcribing chunk. Higher means longer lines.</div>
           </div>
 
           <div className="field">
