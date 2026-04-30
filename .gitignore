@@ -1,3 +1,5 @@
 .venv
 Transcripts/
 TXT/
+.opencode/
+.opencode-router/

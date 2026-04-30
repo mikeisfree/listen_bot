@@ -155,7 +155,7 @@ class TranscriptionManager:
                                 segs, _ = model.transcribe(
                                     buf_copy,
                                     beam_size=5,
-                                    language="pl",
+                                    language="en",
                                     vad_filter=True,
                                     condition_on_previous_text=False,  # Ogranicza "halucynacje" i zator buforów gdy leci cisza
                                 )
