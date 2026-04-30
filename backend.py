@@ -39,6 +39,7 @@ class TranscriptionManager:
         self.system_task = None
         self.command_task = None
         self.running_sources = set()
+        self.transcription_lock = asyncio.Lock()
 
     async def broadcast(self, message):
         print(f"[LOG] {message.get('text', message.get('message', ''))}")
@@ -86,7 +87,7 @@ class TranscriptionManager:
                         break
         return device_id, devices
 
-    async def start_transcription(self, model_size, filename, source_type="system", command_mode=False, interval=6.0):
+    async def start_transcription(self, model_size, filename, source_type="system", command_mode=False, interval=6.0, device_id=None, shared_model=None):
         self.current_filename = filename
         output_dir = "Transcripts"
         os.makedirs(output_dir, exist_ok=True)
@@ -99,18 +100,26 @@ class TranscriptionManager:
                 with open(output_path, "w", encoding="utf-8") as f:
                     f.write(f"# Transcription: {filename}\nSource: {source_type}\nDate: {datetime.now()}\n\n---\n\n")
 
-        await self.broadcast({"type": "status", "text": f"Loading model '{model_size}' for {source_type}..."})
+        if shared_model is None:
+            await self.broadcast({"type": "status", "text": f"Loading model '{model_size}' for {source_type}..."})
 
-        def load_model():
-            try:
-                return WhisperModel(model_size, device="cuda", compute_type="int8")
-            except Exception:
-                return WhisperModel(model_size, device="cpu", compute_type="int8", cpu_threads=4)
+            def load_model():
+                try:
+                    return WhisperModel(model_size, device="cuda", compute_type="int8")
+                except Exception:
+                    return WhisperModel(model_size, device="cpu", compute_type="int8", cpu_threads=4)
 
-        model = await asyncio.get_running_loop().run_in_executor(None, load_model)
-        await self.broadcast({"type": "status", "text": f"Model loaded. Source: {source_type}. Recording..."})
+            model = await asyncio.get_running_loop().run_in_executor(None, load_model)
+            await self.broadcast({"type": "status", "text": f"Model loaded. Source: {source_type}. Recording..."})
+        else:
+            model = shared_model
+            await self.broadcast({"type": "status", "text": f"Ready with shared model. Source: {source_type}. Recording..."})
 
-        device_id, devices = self._select_device(source_type)
+        if device_id is None:
+            device_id, devices = self._select_device(source_type)
+        else:
+            devices = sd.query_devices()
+
         device_name = devices[device_id]["name"] if device_id is not None and 0 <= device_id < len(devices) else "Default"
         print(f"[LOG] Using device: {device_name} (ID: {device_id})")
 
@@ -121,6 +130,11 @@ class TranscriptionManager:
             self.running_sources.add("mic_command")
         else:
             self.running_sources.add(source_type)
+
+        # Trik na PipeWire/PulseAudio - unikalna nazwa klienta PyAudio stream dla rutera Pavucontrol
+        # To pozwala GUI Linuxa rozróznic Twoj system stream i mic stream bez laczenia wezlow
+        prev_pulse_prop = os.environ.get("PULSE_PROP")
+        os.environ["PULSE_PROP"] = f"application.name='listen_bot_{source_type}'"
 
         audio_buffer = np.array([], dtype=np.float32)
         last_text = ""
@@ -135,29 +149,26 @@ class TranscriptionManager:
 
                     if len(audio_buffer) >= self.sample_rate * interval:
                         try:
-                            segments, _ = model.transcribe(
-                                audio_buffer,
-                                beam_size=5,
-                                language="pl",
-                                vad_filter=True,
-                                condition_on_previous_text=True,
-                            )
+                            buf_copy = audio_buffer.copy()
+
+                            def run_whisper():
+                                segs, _ = model.transcribe(
+                                    buf_copy,
+                                    beam_size=5,
+                                    language="pl",
+                                    vad_filter=True,
+                                    condition_on_previous_text=False,  # Ogranicza "halucynacje" i zator buforów gdy leci cisza
+                                )
+                                return [s.text.strip() for s in list(segs) if s.text.strip()]
+
+                            async with self.transcription_lock:
+                                found = await asyncio.get_running_loop().run_in_executor(None, run_whisper)
+                                
                         except Exception as e:
                             await self.broadcast({"type": "error", "message": f"Transcribe error for {source_type}: {str(e)}"})
                             audio_buffer = np.array([], dtype=np.float32)
-                            await asyncio.sleep(0.2)
+                            await asyncio.sleep(0.1)
                             continue
-
-                        found = []
-                        for s in segments:
-                            t = s.text.strip()
-                            if not t:
-                                continue
-                            if command_mode:
-                                found.append(t)
-                            elif t != last_text:
-                                found.append(t)
-                                last_text = t
 
                         if command_mode:
                             recognized = " ".join(found).lower()
@@ -180,8 +191,16 @@ class TranscriptionManager:
             print(f"[LOG] Transcription task cancelled for source: {source_type}")
             raise
         except Exception as e:
-            await self.broadcast({"type": "error", "message": f"Source {source_type} failed: {str(e)}"})
+            msg = str(e)
+            if "Invalid sample rate" in msg or "-9997" in msg:
+                 msg += " (Spróbuj wybrać indeks obok 'default', 'pulse' lub 'pipewire'. Bezpośrednie id sprzętowe z ALSA pod Linuksem odrzucają skalowanie do wymaganych natywnie rzędu 16kHz dla Whisper'a!)"
+            await self.broadcast({"type": "error", "message": f"Source {source_type} failed: {msg}"})
         finally:
+            if prev_pulse_prop is not None:
+                os.environ["PULSE_PROP"] = prev_pulse_prop
+            else:
+                os.environ.pop("PULSE_PROP", None)
+            
             key = "mic_command" if command_mode else source_type
             self.running_sources.discard(key)
             if source_type == "system":
@@ -208,9 +227,18 @@ class TranscriptionManager:
                     interval = float(data.get("interval", 6))
 
                     if source == "both":
-                        self.system_task = asyncio.create_task(self.start_transcription(model_size, filename, source_type="system", command_mode=False, interval=interval))
-                        self.command_task = asyncio.create_task(self.start_transcription(model_size, f"{filename}_cmd", source_type="mic", command_mode=True, interval=interval))
-                        await self.broadcast({"type": "status", "text": "Started both system transcription and microphone command listener"})
+                        await self.broadcast({"type": "status", "text": f"Loading SHARED model '{model_size}' for BOTH streams..."})
+                        def load_shared():
+                            try:
+                                return WhisperModel(model_size, device="cuda", compute_type="int8")
+                            except Exception:
+                                return WhisperModel(model_size, device="cpu", compute_type="int8", cpu_threads=4)
+                        shared_m = await asyncio.get_running_loop().run_in_executor(None, load_shared)
+
+                        self.system_task = asyncio.create_task(self.start_transcription(model_size, filename, source_type="system", command_mode=False, interval=interval, shared_model=shared_m))
+                        await asyncio.sleep(1.0) # Zabezpieczenie przed ucinaniem portu PortAudio ALSA przy dualnym streamie!
+                        self.command_task = asyncio.create_task(self.start_transcription(model_size, f"{filename}_cmd", source_type="mic", command_mode=True, interval=interval, shared_model=shared_m))
+                        await self.broadcast({"type": "status", "text": "Started both system transcription and microphone listener"})
                     elif source == "system":
                         self.system_task = asyncio.create_task(self.start_transcription(model_size, filename, source_type="system", command_mode=False, interval=interval))
                         await self.broadcast({"type": "status", "text": "Started system transcription"})
@@ -249,6 +277,32 @@ class TranscriptionManager:
                 except ValueError:
                     interval = 6.0
 
+                # Przechwytywanie ID urządzeń z portaudio
+                devices = sd.query_devices()
+                sys_device_id = None
+                mic_device_id = None
+
+                if source in ["system", "both"]:
+                    print("\n[CLI] --- AVAILABLE INPUT DEVICES ---")
+                    for i, dev in enumerate(devices):
+                        if dev["max_input_channels"] > 0:
+                            print(f"  [{i}] {dev['name']}")
+                    print("[CLI] Select device ID for SYSTEM AUDIO (or press Enter for auto): ", end="", flush=True)
+                    choice = await asyncio.get_running_loop().run_in_executor(None, sys.stdin.readline)
+                    if choice.strip().isdigit():
+                        sys_device_id = int(choice.strip())
+
+                if source in ["mic", "both"]:
+                    if source != "both":
+                        print("\n[CLI] --- AVAILABLE INPUT DEVICES ---")
+                        for i, dev in enumerate(devices):
+                            if dev["max_input_channels"] > 0:
+                                print(f"  [{i}] {dev['name']}")
+                    print("[CLI] Select device ID for MICROPHONE (or press Enter for auto): ", end="", flush=True)
+                    choice = await asyncio.get_running_loop().run_in_executor(None, sys.stdin.readline)
+                    if choice.strip().isdigit():
+                        mic_device_id = int(choice.strip())
+
                 print(f"[CLI] Starting local transcription for: {filename} from {source} (Model: {model_size}, Delay: {interval}s)")
 
                 if source == "both":
@@ -256,10 +310,22 @@ class TranscriptionManager:
                         self.system_task.cancel()
                     if self.command_task and not self.command_task.done():
                         self.command_task.cancel()
-                    self.system_task = asyncio.create_task(self.start_transcription(model_size, filename, source_type="system", command_mode=False, interval=interval))
-                    self.command_task = asyncio.create_task(self.start_transcription(model_size, f"{filename}_cmd", source_type="mic", command_mode=True, interval=interval))
+                    
+                    print(f"[CLI] Loading SHARED model '{model_size}' ONCE for both streams...")
+                    def load_cli():
+                        try:
+                            return WhisperModel(model_size, device="cuda", compute_type="int8")
+                        except Exception:
+                            return WhisperModel(model_size, device="cpu", compute_type="int8", cpu_threads=4)
+                    shared_m = await asyncio.get_running_loop().run_in_executor(None, load_cli)
+                    
+                    self.system_task = asyncio.create_task(self.start_transcription(model_size, filename, source_type="system", command_mode=False, interval=interval, device_id=sys_device_id, shared_model=shared_m))
+                    await asyncio.sleep(1.0) # Zabezpieczenie routingu ALSA pcm by nie zawieszać wyboru systemowego Pipewire
+                    self.command_task = asyncio.create_task(self.start_transcription(model_size, f"{filename}_cmd", source_type="mic", command_mode=True, interval=interval, device_id=mic_device_id, shared_model=shared_m))
+                    await asyncio.gather(self.system_task, self.command_task, return_exceptions=True)
                 else:
-                    await self.start_transcription(model_size, filename, source_type=source, command_mode=False, interval=interval)
+                    selected_id = sys_device_id if source == "system" else mic_device_id
+                    await self.start_transcription(model_size, filename, source_type=source, command_mode=False, interval=interval, device_id=selected_id)
             await asyncio.sleep(1)
 
 async def main():
