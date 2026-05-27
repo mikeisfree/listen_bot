@@ -1,0 +1,21 @@
+services:
+  backend:
+    build: .
+    restart: unless-stopped
+    # Pass through host audio devices (required for sounddevice/PulseAudio).
+    # On a VPS without physical audio hardware, use a virtual PulseAudio sink.
+    devices:
+      - /dev/snd:/dev/snd
+    volumes:
+      - /run/user/1000/pulse:/run/user/1000/pulse
+    environment:
+      - PORT=8765
+      - PULSE_SERVER=unix:/run/user/1000/pulse/native
+
+  frontend:
+    build: ./frontend
+    restart: unless-stopped
+    ports:
+      - "80:80"
+    depends_on:
+      - backend
