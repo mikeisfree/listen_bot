@@ -259,7 +259,7 @@ const App: React.FC = () => {
     const audioCtx = new AudioContext({ sampleRate: 16000 });
     audioContextRef.current = audioCtx;
 
-    const source = audioCtx.createMediaStreamSource(stream);
+    const audioSource = audioCtx.createMediaStreamSource(stream);
     // 4096 samples @ 16 kHz ≈ 256 ms per chunk
     const processor = audioCtx.createScriptProcessor(4096, 1, 1);
     processorRef.current = processor;
@@ -272,7 +272,7 @@ const App: React.FC = () => {
       }
     };
 
-    source.connect(processor);
+    audioSource.connect(processor);
     processor.connect(audioCtx.destination);
 
     const now = new Date().toISOString();
