@@ -344,7 +344,7 @@ const App: React.FC = () => {
     <div className="layout">
       <aside className="sidebar">
         <header className="sidebar-header">
-          <h1 className="app-title">ListenBot</h1>
+          <h1 className="app-title">Hey!Listen</h1>
           <div className="status-indicator">
             <span className={`status-dot ${isConnected ? "connected" : "disconnected"}`} />
             <span className="status-text">{isConnected ? "Server Active" : "Offline"}</span>
