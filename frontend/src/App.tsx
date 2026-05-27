@@ -12,8 +12,14 @@ interface SavedSession {
   id: string;
   date: string;
   language: string;
+  source?: string;
   segments: string[];
 }
+
+const SOURCE_LABELS: Record<string, string> = {
+  system: "System",
+  mic: "Mic",
+};
 
 type ViewMode = "live" | "history" | "detail";
 
@@ -67,6 +73,7 @@ function persistSessions(sessions: SavedSession[]): void {
 const App: React.FC = () => {
   // Settings
   const [model, setModel] = useState("small");
+  const [source, setSource] = useState("system");
   const [language, setLanguage] = useState("pl");
   const [interval, setIntervalVal] = useState("6.0");
 
@@ -84,7 +91,7 @@ const App: React.FC = () => {
   const transcriptsRef = useRef<string[]>([]);
 
   // Session tracking (for saving)
-  const activeSession = useRef<{ id: string; date: string; language: string } | null>(null);
+  const activeSession = useRef<{ id: string; date: string; language: string; source: string } | null>(null);
 
   // WebSocket
   const ws = useRef<WebSocket | null>(null);
@@ -209,21 +216,41 @@ const App: React.FC = () => {
     setMicError(null);
     if (ws.current?.readyState !== WebSocket.OPEN) return;
 
-    if (!navigator.mediaDevices?.getUserMedia) {
-      setMicError("Microphone requires HTTPS. Open this app over https:// (configure SSL in Coolify).");
-      return;
-    }
-
     if (transcriptsRef.current.length > 0 && activeSession.current) {
       saveCurrentSession();
     }
 
     let stream: MediaStream;
-    try {
-      stream = await navigator.mediaDevices.getUserMedia({ audio: true, video: false });
-    } catch (err) {
-      setMicError(`Mic blocked: ${err instanceof Error ? err.message : String(err)}`);
-      return;
+
+    if (source === "system") {
+      if (!navigator.mediaDevices?.getDisplayMedia) {
+        setMicError("Screen capture not supported in this browser. Try Chrome or Edge.");
+        return;
+      }
+      try {
+        // Chrome requires video:true even when only audio is needed — stop video tracks immediately
+        const display = await navigator.mediaDevices.getDisplayMedia({ audio: true, video: true });
+        display.getVideoTracks().forEach((t) => t.stop());
+        stream = display;
+        if (stream.getAudioTracks().length === 0) {
+          setMicError("No audio captured. Select a source and check 'Share audio' / 'Share tab audio'.");
+          return;
+        }
+      } catch (err) {
+        setMicError(`Capture cancelled: ${err instanceof Error ? err.message : String(err)}`);
+        return;
+      }
+    } else {
+      if (!navigator.mediaDevices?.getUserMedia) {
+        setMicError("Microphone requires HTTPS.");
+        return;
+      }
+      try {
+        stream = await navigator.mediaDevices.getUserMedia({ audio: true, video: false });
+      } catch (err) {
+        setMicError(`Mic blocked: ${err instanceof Error ? err.message : String(err)}`);
+        return;
+      }
     }
 
     streamRef.current = stream;
@@ -253,6 +280,7 @@ const App: React.FC = () => {
       id: now.replace(/[:.]/g, "-").slice(0, 19),
       date: now,
       language,
+      source,
     };
     lastTranscript.current = null;
     setTranscripts([]);
@@ -287,9 +315,10 @@ const App: React.FC = () => {
   const downloadSession = (session: SavedSession) => {
     const langLabel = LANGUAGE_OPTIONS.find((o) => o.value === session.language)?.label ?? session.language;
     const langName = langLabel.split("—")[1]?.trim() ?? session.language;
+    const srcLabel = SOURCE_LABELS[session.source ?? "system"] ?? session.source ?? "System";
     const content = [
       `# Transcript — ${formatDate(session.date)}`,
-      `Language: ${langName}`,
+      `Language: ${langName} | Source: ${srcLabel}`,
       "",
       "---",
       "",
@@ -323,6 +352,15 @@ const App: React.FC = () => {
         </header>
 
         <form className="settings-form" onSubmit={(e) => e.preventDefault()}>
+          <div className="field">
+            <label htmlFor="source">Audio Source</label>
+            <select id="source" value={source} onChange={(e) => setSource(e.target.value)} disabled={isRunning}>
+              <option value="system">System Audio (tab / screen)</option>
+              <option value="mic">Microphone</option>
+            </select>
+            <div className="field-help">System: picks browser tab or screen with audio.</div>
+          </div>
+
           <div className="field">
             <label htmlFor="model">Whisper Model</label>
             <select id="model" value={model} onChange={(e) => setModel(e.target.value)} disabled={isRunning}>
@@ -371,6 +409,7 @@ const App: React.FC = () => {
             </button>
           )}
           {micError && <p className="mic-error">{micError}</p>}
+          {micError && <p className="error-notice">{micError}</p>}
           <button
             className={`btn btn-secondary${viewMode !== "live" ? " active" : ""}`}
             onClick={() => {
@@ -459,6 +498,7 @@ const App: React.FC = () => {
                     <span className="history-date">{formatDate(session.date)}</span>
                     <div className="history-tags">
                       <span className="tag">{session.language.toUpperCase()}</span>
+                      <span className="tag">{SOURCE_LABELS[session.source ?? "system"] ?? session.source}</span>
                       <span className="tag">{session.segments.length} seg</span>
                     </div>
                   </div>
