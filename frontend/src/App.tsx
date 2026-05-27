@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useRef } from "react";
+import React, { useState, useEffect, useRef, useCallback } from "react";
 import "./index.css";
 
 interface WsMessage {
@@ -12,7 +12,6 @@ interface SavedSession {
   id: string;
   date: string;
   language: string;
-  source: string;
   segments: string[];
 }
 
@@ -28,12 +27,6 @@ const LANGUAGE_OPTIONS: { value: string; label: string }[] = [
   { value: "es", label: "ES — Español" },
   { value: "it", label: "IT — Italiano" },
 ];
-
-const SOURCE_LABELS: Record<string, string> = {
-  system: "System",
-  mic: "Mic",
-  both: "Both",
-};
 
 function getWsUrl(): string {
   const proto = window.location.protocol === "https:" ? "wss:" : "ws:";
@@ -74,7 +67,6 @@ function persistSessions(sessions: SavedSession[]): void {
 const App: React.FC = () => {
   // Settings
   const [model, setModel] = useState("small");
-  const [source, setSource] = useState("system");
   const [language, setLanguage] = useState("pl");
   const [interval, setIntervalVal] = useState("6.0");
 
@@ -91,11 +83,16 @@ const App: React.FC = () => {
   const transcriptsRef = useRef<string[]>([]);
 
   // Session tracking (for saving)
-  const activeSession = useRef<{ id: string; date: string; language: string; source: string } | null>(null);
+  const activeSession = useRef<{ id: string; date: string; language: string } | null>(null);
 
   // WebSocket
   const ws = useRef<WebSocket | null>(null);
   const reconnectTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  // Audio capture — browser microphone → raw PCM → WebSocket
+  const audioContextRef = useRef<AudioContext | null>(null);
+  const processorRef = useRef<ScriptProcessorNode | null>(null);
+  const streamRef = useRef<MediaStream | null>(null);
 
   // Navigation
   const [viewMode, setViewMode] = useState<ViewMode>("live");
@@ -111,7 +108,7 @@ const App: React.FC = () => {
     }
   }, [transcripts]);
 
-  const saveCurrentSession = () => {
+  const saveCurrentSession = useCallback(() => {
     const meta = activeSession.current;
     const segs = transcriptsRef.current;
     if (!meta || segs.length === 0) return;
@@ -122,21 +119,31 @@ const App: React.FC = () => {
       return updated;
     });
     activeSession.current = null;
-  };
+  }, []);
+
+  // Stop browser audio stream without touching WebSocket
+  const stopAudio = useCallback(() => {
+    processorRef.current?.disconnect();
+    processorRef.current = null;
+    void audioContextRef.current?.close();
+    audioContextRef.current = null;
+    streamRef.current?.getTracks().forEach((t) => t.stop());
+    streamRef.current = null;
+  }, []);
 
   // Auto-save when transcription stops
   useEffect(() => {
     if (!isRunning) saveCurrentSession();
-  }, [isRunning]); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [isRunning, saveCurrentSession]);
 
   // Save on page close
   useEffect(() => {
     const handleUnload = () => saveCurrentSession();
     window.addEventListener("beforeunload", handleUnload);
     return () => window.removeEventListener("beforeunload", handleUnload);
-  }, []); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [saveCurrentSession]);
 
-  const connect = () => {
+  const connect = useCallback(() => {
     if (reconnectTimer.current) {
       clearTimeout(reconnectTimer.current);
       reconnectTimer.current = null;
@@ -156,11 +163,12 @@ const App: React.FC = () => {
       setIsConnected(false);
       setIsRunning(false);
       setStatus("Server Offline");
+      stopAudio();
       reconnectTimer.current = setTimeout(connect, 3000);
     };
 
     ws.current.onmessage = (event) => {
-      const data: WsMessage = JSON.parse(event.data);
+      const data: WsMessage = JSON.parse(event.data as string);
       if (data.type === "status") {
         setStatus(data.text ?? "");
         if (data.text?.includes("Recording")) setIsRunning(true);
@@ -183,7 +191,7 @@ const App: React.FC = () => {
         setIsRunning(false);
       }
     };
-  };
+  }, [stopAudio]);
 
   useEffect(() => {
     connect();
@@ -194,30 +202,63 @@ const App: React.FC = () => {
         ws.current.close();
       }
     };
-  }, []); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [connect]);
 
-  const startTranscription = () => {
+  const startTranscription = async () => {
     if (ws.current?.readyState !== WebSocket.OPEN) return;
+
     if (transcriptsRef.current.length > 0 && activeSession.current) {
       saveCurrentSession();
     }
+
+    let stream: MediaStream;
+    try {
+      stream = await navigator.mediaDevices.getUserMedia({ audio: true, video: false });
+    } catch (err) {
+      setStatus(`Microphone access denied: ${err instanceof Error ? err.message : String(err)}`);
+      return;
+    }
+
+    streamRef.current = stream;
+
+    // Request 16 kHz to match Whisper's native sample rate — no backend resampling needed
+    const audioCtx = new AudioContext({ sampleRate: 16000 });
+    audioContextRef.current = audioCtx;
+
+    const source = audioCtx.createMediaStreamSource(stream);
+    // 4096 samples @ 16 kHz ≈ 256 ms per chunk
+    const processor = audioCtx.createScriptProcessor(4096, 1, 1);
+    processorRef.current = processor;
+
+    processor.onaudioprocess = (e) => {
+      if (ws.current?.readyState === WebSocket.OPEN) {
+        // .slice() copies the Float32Array so we don't send a stale shared buffer
+        const pcm = e.inputBuffer.getChannelData(0).slice();
+        ws.current.send(pcm.buffer);
+      }
+    };
+
+    source.connect(processor);
+    processor.connect(audioCtx.destination);
+
     const now = new Date().toISOString();
     activeSession.current = {
       id: now.replace(/[:.]/g, "-").slice(0, 19),
       date: now,
       language,
-      source,
     };
     lastTranscript.current = null;
     setTranscripts([]);
     setViewMode("live");
+
     ws.current.send(
-      JSON.stringify({ action: "start", model, source, language, interval: parseFloat(interval) })
+      JSON.stringify({ action: "start", model, language, interval: parseFloat(interval) })
     );
     setStatus("Starting...");
   };
 
   const stopTranscription = () => {
+    stopAudio();
     if (ws.current?.readyState === WebSocket.OPEN) {
       ws.current.send(JSON.stringify({ action: "stop" }));
     }
@@ -239,10 +280,9 @@ const App: React.FC = () => {
   const downloadSession = (session: SavedSession) => {
     const langLabel = LANGUAGE_OPTIONS.find((o) => o.value === session.language)?.label ?? session.language;
     const langName = langLabel.split("—")[1]?.trim() ?? session.language;
-    const sourceName = SOURCE_LABELS[session.source] ?? session.source;
     const content = [
       `# Transcript — ${formatDate(session.date)}`,
-      `Language: ${langName} | Source: ${sourceName}`,
+      `Language: ${langName}`,
       "",
       "---",
       "",
@@ -285,15 +325,6 @@ const App: React.FC = () => {
               <option value="medium">Medium (Professional)</option>
             </select>
             <div className="field-help">Determines transcription speed vs accuracy.</div>
-          </div>
-
-          <div className="field">
-            <label htmlFor="source">Audio Source</label>
-            <select id="source" value={source} onChange={(e) => setSource(e.target.value)} disabled={isRunning}>
-              <option value="system">System Audio (Monitor)</option>
-              <option value="mic">Microphone (Input)</option>
-              <option value="both">Both: System + voice command</option>
-            </select>
           </div>
 
           <div className="field">
@@ -356,9 +387,7 @@ const App: React.FC = () => {
             <h2>{contentTitle}</h2>
             {viewMode === "detail" && selectedSession && (
               <div className="session-meta">
-                {selectedSession.language.toUpperCase()} ·{" "}
-                {SOURCE_LABELS[selectedSession.source] ?? selectedSession.source} ·{" "}
-                {selectedSession.segments.length} segments
+                {selectedSession.language.toUpperCase()} · {selectedSession.segments.length} segments
               </div>
             )}
           </div>
@@ -422,7 +451,6 @@ const App: React.FC = () => {
                     <span className="history-date">{formatDate(session.date)}</span>
                     <div className="history-tags">
                       <span className="tag">{session.language.toUpperCase()}</span>
-                      <span className="tag">{SOURCE_LABELS[session.source] ?? session.source}</span>
                       <span className="tag">{session.segments.length} seg</span>
                     </div>
                   </div>
