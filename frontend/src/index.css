@@ -519,3 +519,10 @@ input::placeholder {
   gap: 20px;
   padding-top: 4px;
 }
+
+.mic-error {
+  font-size: 12px;
+  color: #ff6b6b;
+  margin-top: 10px;
+  line-height: 1.5;
+}

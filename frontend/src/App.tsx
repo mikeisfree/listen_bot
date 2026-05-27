@@ -75,6 +75,7 @@ const App: React.FC = () => {
   const [isConnected, setIsConnected] = useState(false);
   const [status, setStatus] = useState("Disconnected");
   const [keywordDetected, setKeywordDetected] = useState(false);
+  const [micError, setMicError] = useState<string | null>(null);
 
   // Live transcript
   const [transcripts, setTranscripts] = useState<string[]>([]);
@@ -205,7 +206,13 @@ const App: React.FC = () => {
   }, [connect]);
 
   const startTranscription = async () => {
+    setMicError(null);
     if (ws.current?.readyState !== WebSocket.OPEN) return;
+
+    if (!navigator.mediaDevices?.getUserMedia) {
+      setMicError("Microphone requires HTTPS. Open this app over https:// (configure SSL in Coolify).");
+      return;
+    }
 
     if (transcriptsRef.current.length > 0 && activeSession.current) {
       saveCurrentSession();
@@ -215,7 +222,7 @@ const App: React.FC = () => {
     try {
       stream = await navigator.mediaDevices.getUserMedia({ audio: true, video: false });
     } catch (err) {
-      setStatus(`Microphone access denied: ${err instanceof Error ? err.message : String(err)}`);
+      setMicError(`Mic blocked: ${err instanceof Error ? err.message : String(err)}`);
       return;
     }
 
@@ -363,6 +370,7 @@ const App: React.FC = () => {
               Start Recording
             </button>
           )}
+          {micError && <p className="mic-error">{micError}</p>}
           <button
             className={`btn btn-secondary${viewMode !== "live" ? " active" : ""}`}
             onClick={() => {

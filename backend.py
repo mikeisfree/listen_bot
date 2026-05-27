@@ -150,6 +150,8 @@ class ClientSession:
 
                     if len(self.audio_buffer) >= self.SAMPLE_RATE * self.interval:
                         await self._transcribe_buffer()
+        except websockets.exceptions.ConnectionClosed:
+            pass  # normal browser disconnect — no close frame on tab close/reload
         finally:
             self.running = False
 
