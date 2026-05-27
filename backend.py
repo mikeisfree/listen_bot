@@ -120,12 +120,19 @@ class ClientSession:
         command_mode: bool = False,
         device_id: int | None = None,
     ):
+        # Check audio devices early — give a clear error on VPS without audio hardware
+        try:
+            devices = sd.query_devices()
+        except Exception as e:
+            await self.send({"type": "error", "message": f"No audio devices found on this server: {e}. A virtual audio sink (PulseAudio) is required on VPS."})
+            return
+
         await self.send({"type": "status", "text": f"Loading model '{model_size}'..."})
         model, infer_lock = await get_model(model_size)
         await self.send({"type": "status", "text": f"Ready. Source: {source_type}. Recording..."})
 
         if device_id is None:
-            device_id, devices = self._select_device(source_type)
+            device_id, _ = self._select_device(source_type)
         else:
             devices = sd.query_devices()
 
