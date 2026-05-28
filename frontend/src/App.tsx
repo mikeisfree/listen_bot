@@ -24,7 +24,8 @@ const SOURCE_LABELS: Record<string, string> = {
 type ViewMode = "live" | "history" | "detail";
 
 const STORAGE_KEY = "listenbot_transcripts";
-const MAX_SESSIONS = 50;
+const MAX_SESSIONS = 5;
+const WARN_SESSIONS = 3;
 
 const LANGUAGE_OPTIONS: { value: string; label: string }[] = [
   { value: "pl", label: "PL — Polski" },
@@ -83,6 +84,7 @@ const App: React.FC = () => {
   const [status, setStatus] = useState("Disconnected");
   const [keywordDetected, setKeywordDetected] = useState(false);
   const [micError, setMicError] = useState<string | null>(null);
+  const [sessionWarning, setSessionWarning] = useState<string | null>(null);
 
   // Live transcript
   const [transcripts, setTranscripts] = useState<string[]>([]);
@@ -124,6 +126,9 @@ const App: React.FC = () => {
     setSavedSessions((prev) => {
       const updated = [session, ...prev.filter((s) => s.id !== session.id)];
       persistSessions(updated);
+      if (updated.length >= WARN_SESSIONS) {
+        setSessionWarning(`You have ${updated.length} saved sessions (limit: ${MAX_SESSIONS}). Consider downloading or deleting old ones.`);
+      }
       return updated;
     });
     activeSession.current = null;
@@ -184,7 +189,7 @@ const App: React.FC = () => {
       } else if (data.type === "transcript") {
         const text = data.text ?? "";
         if (text !== lastTranscript.current) {
-          setTranscripts((prev) => [...prev.slice(-100), text]);
+          setTranscripts((prev) => [...prev, text]);
           lastTranscript.current = text;
           setIsRunning(true);
         }
@@ -409,7 +414,7 @@ const App: React.FC = () => {
             </button>
           )}
           {micError && <p className="mic-error">{micError}</p>}
-          {micError && <p className="error-notice">{micError}</p>}
+          {sessionWarning && <p className="session-warning">{sessionWarning}</p>}
           <button
             className={`btn btn-secondary${viewMode !== "live" ? " active" : ""}`}
             onClick={() => {
