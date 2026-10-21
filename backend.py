@@ -2,6 +2,7 @@ import os
 import sys
 import ctypes
 import asyncio
+import subprocess
 import sounddevice as sd
 import numpy as np
 import queue
@@ -13,7 +14,13 @@ from faster_whisper import WhisperModel
 # --- NVIDIA LIBRARY PATH HACK ---
 def setup_cuda_paths():
     venv_base = os.getcwd()
-    site_packages = os.path.join(venv_base, ".venv", "lib", "python3.13", "site-packages")
+    py_dir = f"python{sys.version_info.major}.{sys.version_info.minor}"
+    site_packages = os.path.join(venv_base, ".venv", "lib", py_dir, "site-packages")
+    if not os.path.isdir(site_packages):
+        import glob
+        candidates = glob.glob(os.path.join(venv_base, ".venv", "lib", "python3.*", "site-packages"))
+        if candidates:
+            site_packages = candidates[0]
     potential_libs = [
         os.path.join(site_packages, "nvidia", "cublas", "lib", "libcublas.so.12"),
         os.path.join(site_packages, "nvidia", "cudnn", "lib", "libcudnn.so.9"),
@@ -29,6 +36,39 @@ def setup_cuda_paths():
                 except: pass
 setup_cuda_paths()
 # -------------------------------
+
+def _pulse_sources():
+    """Nazwy źródeł PulseAudio/PipeWire (np. 'alsa_input...', '....monitor')."""
+    try:
+        out = subprocess.run(
+            ["pactl", "list", "sources", "short"],
+            capture_output=True, text=True, timeout=3, check=True,
+        ).stdout
+        return [line.split("\t")[1] for line in out.strip().splitlines() if "\t" in line]
+    except Exception:
+        return []
+
+def _pulse_default_source():
+    try:
+        out = subprocess.run(
+            ["pactl", "get-default-source"],
+            capture_output=True, text=True, timeout=3, check=True,
+        ).stdout
+        return out.strip() or None
+    except Exception:
+        return None
+
+def _find_pulse_hostapi_device(devices):
+    """Indeks ALSA PCM 'pulse' - w odróżnieniu od 'default'/'pipewire' respektuje
+    zmienną PULSE_SOURCE, co pozwala obejść zepsutą rezolucję domyślnego źródła
+    przez WirePlumber (default.audio.source bywa nigdy nie ustawione)."""
+    for i, dev in enumerate(devices):
+        if dev["name"] == "pulse" and dev["max_input_channels"] > 0:
+            return i
+    for i, dev in enumerate(devices):
+        if dev["name"] == "pipewire" and dev["max_input_channels"] > 0:
+            return i
+    return None
 
 class TranscriptionManager:
     def __init__(self):
@@ -63,6 +103,22 @@ class TranscriptionManager:
 
     def _select_device(self, source_type):
         devices = sd.query_devices()
+        pulse_device_id = _find_pulse_hostapi_device(devices)
+        sources = _pulse_sources() if pulse_device_id is not None else []
+
+        if sources:
+            if source_type == "system":
+                source_name = next((s for s in sources if s.endswith(".monitor")), None)
+            else:
+                default_source = _pulse_default_source()
+                if default_source in sources and not default_source.endswith(".monitor"):
+                    source_name = default_source
+                else:
+                    source_name = next((s for s in sources if not s.endswith(".monitor")), None)
+            if source_name:
+                return pulse_device_id, devices, source_name
+
+        # Fallback dla systemów bez PulseAudio/pactl - stara heurystyka po indeksach ALSA
         device_id = None
         if source_type == "system":
             for i, dev in enumerate(devices):
@@ -85,9 +141,9 @@ class TranscriptionManager:
                     if dev["max_input_channels"] > 0 and "microphone" in dev["name"].lower():
                         device_id = i
                         break
-        return device_id, devices
+        return device_id, devices, None
 
-    async def start_transcription(self, model_size, filename, source_type="system", command_mode=False, interval=6.0, device_id=None, shared_model=None):
+    async def start_transcription(self, model_size, filename, source_type="system", command_mode=False, interval=6.0, device_id=None, pulse_source=None, shared_model=None):
         self.current_filename = filename
         output_dir = "Transcripts"
         os.makedirs(output_dir, exist_ok=True)
@@ -115,10 +171,13 @@ class TranscriptionManager:
             model = shared_model
             await self.broadcast({"type": "status", "text": f"Ready with shared model. Source: {source_type}. Recording..."})
 
-        if device_id is None:
-            device_id, devices = self._select_device(source_type)
-        else:
-            devices = sd.query_devices()
+        devices = sd.query_devices()
+        if device_id is None and pulse_source is None:
+            device_id, devices, pulse_source = self._select_device(source_type)
+        elif pulse_source is not None:
+            pulse_device_id = _find_pulse_hostapi_device(devices)
+            if pulse_device_id is not None:
+                device_id = pulse_device_id
 
         device_name = devices[device_id]["name"] if device_id is not None and 0 <= device_id < len(devices) else "Default"
         print(f"[LOG] Using device: {device_name} (ID: {device_id})")
@@ -135,6 +194,11 @@ class TranscriptionManager:
         # To pozwala GUI Linuxa rozróznic Twoj system stream i mic stream bez laczenia wezlow
         prev_pulse_prop = os.environ.get("PULSE_PROP")
         os.environ["PULSE_PROP"] = f"application.name='listen_bot_{source_type}'"
+
+        prev_pulse_source = os.environ.get("PULSE_SOURCE")
+        if pulse_source:
+            os.environ["PULSE_SOURCE"] = pulse_source
+            print(f"[LOG] Forcing PULSE_SOURCE={pulse_source} (bypassing domyślną rezolucję źródła PipeWire/WirePlumber)")
 
         audio_buffer = np.array([], dtype=np.float32)
         last_text = ""
@@ -200,7 +264,13 @@ class TranscriptionManager:
                 os.environ["PULSE_PROP"] = prev_pulse_prop
             else:
                 os.environ.pop("PULSE_PROP", None)
-            
+
+            if pulse_source:
+                if prev_pulse_source is not None:
+                    os.environ["PULSE_SOURCE"] = prev_pulse_source
+                else:
+                    os.environ.pop("PULSE_SOURCE", None)
+
             key = "mic_command" if command_mode else source_type
             self.running_sources.discard(key)
             if source_type == "system":
@@ -277,31 +347,53 @@ class TranscriptionManager:
                 except ValueError:
                     interval = 6.0
 
-                # Przechwytywanie ID urządzeń z portaudio
+                # Przechwytywanie źródeł audio. Preferujemy nazwane źródła Pulse/PipeWire
+                # (patrz _select_device) - omijają zepsutą rezolucję "default" przez WirePlumber.
                 devices = sd.query_devices()
+                pulse_sources = _pulse_sources()
                 sys_device_id = None
                 mic_device_id = None
+                sys_pulse_source = None
+                mic_pulse_source = None
 
                 if source in ["system", "both"]:
-                    print("\n[CLI] --- AVAILABLE INPUT DEVICES ---")
-                    for i, dev in enumerate(devices):
-                        if dev["max_input_channels"] > 0:
-                            print(f"  [{i}] {dev['name']}")
-                    print("[CLI] Select device ID for SYSTEM AUDIO (or press Enter for auto): ", end="", flush=True)
-                    choice = await asyncio.get_running_loop().run_in_executor(None, sys.stdin.readline)
-                    if choice.strip().isdigit():
-                        sys_device_id = int(choice.strip())
-
-                if source in ["mic", "both"]:
-                    if source != "both":
+                    if pulse_sources:
+                        print("\n[CLI] --- AVAILABLE PULSE/PIPEWIRE SOURCES (SYSTEM AUDIO) ---")
+                        for i, name in enumerate(pulse_sources):
+                            print(f"  [{i}] {name}")
+                        print("[CLI] Select source index for SYSTEM AUDIO (or press Enter for auto): ", end="", flush=True)
+                        choice = await asyncio.get_running_loop().run_in_executor(None, sys.stdin.readline)
+                        if choice.strip().isdigit() and int(choice.strip()) < len(pulse_sources):
+                            sys_pulse_source = pulse_sources[int(choice.strip())]
+                    else:
                         print("\n[CLI] --- AVAILABLE INPUT DEVICES ---")
                         for i, dev in enumerate(devices):
                             if dev["max_input_channels"] > 0:
                                 print(f"  [{i}] {dev['name']}")
-                    print("[CLI] Select device ID for MICROPHONE (or press Enter for auto): ", end="", flush=True)
-                    choice = await asyncio.get_running_loop().run_in_executor(None, sys.stdin.readline)
-                    if choice.strip().isdigit():
-                        mic_device_id = int(choice.strip())
+                        print("[CLI] Select device ID for SYSTEM AUDIO (or press Enter for auto): ", end="", flush=True)
+                        choice = await asyncio.get_running_loop().run_in_executor(None, sys.stdin.readline)
+                        if choice.strip().isdigit():
+                            sys_device_id = int(choice.strip())
+
+                if source in ["mic", "both"]:
+                    if pulse_sources:
+                        print("\n[CLI] --- AVAILABLE PULSE/PIPEWIRE SOURCES (MICROPHONE) ---")
+                        for i, name in enumerate(pulse_sources):
+                            print(f"  [{i}] {name}")
+                        print("[CLI] Select source index for MICROPHONE (or press Enter for auto): ", end="", flush=True)
+                        choice = await asyncio.get_running_loop().run_in_executor(None, sys.stdin.readline)
+                        if choice.strip().isdigit() and int(choice.strip()) < len(pulse_sources):
+                            mic_pulse_source = pulse_sources[int(choice.strip())]
+                    else:
+                        if source != "both":
+                            print("\n[CLI] --- AVAILABLE INPUT DEVICES ---")
+                            for i, dev in enumerate(devices):
+                                if dev["max_input_channels"] > 0:
+                                    print(f"  [{i}] {dev['name']}")
+                        print("[CLI] Select device ID for MICROPHONE (or press Enter for auto): ", end="", flush=True)
+                        choice = await asyncio.get_running_loop().run_in_executor(None, sys.stdin.readline)
+                        if choice.strip().isdigit():
+                            mic_device_id = int(choice.strip())
 
                 print(f"[CLI] Starting local transcription for: {filename} from {source} (Model: {model_size}, Delay: {interval}s)")
 
@@ -319,13 +411,14 @@ class TranscriptionManager:
                             return WhisperModel(model_size, device="cpu", compute_type="int8", cpu_threads=4)
                     shared_m = await asyncio.get_running_loop().run_in_executor(None, load_cli)
                     
-                    self.system_task = asyncio.create_task(self.start_transcription(model_size, filename, source_type="system", command_mode=False, interval=interval, device_id=sys_device_id, shared_model=shared_m))
+                    self.system_task = asyncio.create_task(self.start_transcription(model_size, filename, source_type="system", command_mode=False, interval=interval, device_id=sys_device_id, pulse_source=sys_pulse_source, shared_model=shared_m))
                     await asyncio.sleep(1.0) # Zabezpieczenie routingu ALSA pcm by nie zawieszać wyboru systemowego Pipewire
-                    self.command_task = asyncio.create_task(self.start_transcription(model_size, f"{filename}_cmd", source_type="mic", command_mode=True, interval=interval, device_id=mic_device_id, shared_model=shared_m))
+                    self.command_task = asyncio.create_task(self.start_transcription(model_size, f"{filename}_cmd", source_type="mic", command_mode=True, interval=interval, device_id=mic_device_id, pulse_source=mic_pulse_source, shared_model=shared_m))
                     await asyncio.gather(self.system_task, self.command_task, return_exceptions=True)
                 else:
                     selected_id = sys_device_id if source == "system" else mic_device_id
-                    await self.start_transcription(model_size, filename, source_type=source, command_mode=False, interval=interval, device_id=selected_id)
+                    selected_pulse_source = sys_pulse_source if source == "system" else mic_pulse_source
+                    await self.start_transcription(model_size, filename, source_type=source, command_mode=False, interval=interval, device_id=selected_id, pulse_source=selected_pulse_source)
             await asyncio.sleep(1)
 
 async def main():
